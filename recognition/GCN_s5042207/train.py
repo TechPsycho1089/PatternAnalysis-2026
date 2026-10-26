@@ -2,16 +2,22 @@
 Train, validate, test and save a node classifier (MLP baseline or GCN).
 
 Usage:
-    python train.py --model mlp
-    python train.py --model gcn --seed 1
+    python train.py --model mlp                 # seeds 0, 1, 2 (default)
+    python train.py --model gcn --seeds 0       # a single quick run
 
 Training is transductive and semi-supervised: the whole graph goes through
 the model every epoch, but the loss only uses the labels of training nodes.
 Validation labels are used only to pick the best epoch (early stopping), and
 test labels are used once, at the very end, to report the final result.
+
+Each seed changes the random weight initialisation and dropout, while the
+train/val/test split stays fixed (--split-seed), so differences between
+seeds show how much results depend on luck.
 """
 import argparse
+import json
 import os
+import statistics
 import time
 
 import matplotlib
@@ -71,26 +77,10 @@ def plot_curves(history, path, title):
     plt.close(fig)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    parser.add_argument("--model", choices=MODELS, default="gcn")
-    parser.add_argument("--seed", type=int, default=0,
-                        help="random seed for weight initialisation and dropout")
-    parser.add_argument("--split-seed", type=int, default=42,
-                        help="seed for the train/val/test split (keep fixed)")
-    parser.add_argument("--hidden", type=int, default=64)
-    parser.add_argument("--dropout", type=float, default=0.5)
-    parser.add_argument("--lr", type=float, default=0.01)
-    parser.add_argument("--weight-decay", type=float, default=5e-4)
-    parser.add_argument("--epochs", type=int, default=300,
-                        help="maximum number of epochs")
-    parser.add_argument("--patience", type=int, default=50,
-                        help="stop after this many epochs without "
-                             "validation-loss improvement")
-    args = parser.parse_args()
-
-    torch.manual_seed(args.seed)
-    data = load_data(seed=args.split_seed)
+def train_one(args, data, seed):
+    """Train one model from one random seed, save it, and return its
+    final validation/test metrics as a dict."""
+    torch.manual_seed(seed)
     model = MODELS[args.model](in_dim=data.num_features, hidden=args.hidden,
                                n_classes=int(data.y.max()) + 1,
                                dropout=args.dropout)
@@ -129,19 +119,64 @@ def main():
     _, val_acc, val_f1 = evaluate(model, data, data.val_mask)
     _, test_acc, test_f1 = evaluate(model, data, data.test_mask)
 
-    print(f"\n{args.model.upper()} (seed {args.seed}): best epoch {best_epoch}, "
+    print(f"\n{args.model.upper()} (seed {seed}): best epoch {best_epoch}, "
           f"trained {epoch} epochs in {train_time:.1f}s")
     print(f"  validation  accuracy {val_acc:.4f}  macro-F1 {val_f1:.4f}")
     print(f"  test        accuracy {test_acc:.4f}  macro-F1 {test_f1:.4f}")
 
     # Save weights (ignored by git) and training curves (for the README)
-    os.makedirs(os.path.join(HERE, "checkpoints"), exist_ok=True)
-    os.makedirs(os.path.join(HERE, "figures"), exist_ok=True)
-    name = f"{args.model}_seed{args.seed}"
+    name = f"{args.model}_seed{seed}"
     torch.save(model.state_dict(), os.path.join(HERE, "checkpoints", f"{name}.pt"))
     plot_curves(history, os.path.join(HERE, "figures", f"{name}_curves.png"),
-                f"{args.model.upper()} training curves (seed {args.seed})")
-    print(f"  saved checkpoints/{name}.pt and figures/{name}_curves.png")
+                f"{args.model.upper()} training curves (seed {seed})")
+    print(f"  saved checkpoints/{name}.pt and figures/{name}_curves.png\n")
+
+    return {"seed": seed, "best_epoch": best_epoch, "train_time_s": train_time,
+            "val_acc": val_acc, "val_macro_f1": val_f1,
+            "test_acc": test_acc, "test_macro_f1": test_f1}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    parser.add_argument("--model", choices=MODELS, default="gcn")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2],
+                        help="one run per seed (weight initialisation and dropout)")
+    parser.add_argument("--split-seed", type=int, default=42,
+                        help="seed for the train/val/test split (keep fixed)")
+    parser.add_argument("--hidden", type=int, default=64)
+    parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument("--weight-decay", type=float, default=5e-4)
+    parser.add_argument("--epochs", type=int, default=1000,
+                        help="maximum number of epochs")
+    parser.add_argument("--patience", type=int, default=50,
+                        help="stop after this many epochs without "
+                             "validation-loss improvement")
+    args = parser.parse_args()
+
+    for folder in ("checkpoints", "figures", "results"):
+        os.makedirs(os.path.join(HERE, folder), exist_ok=True)
+
+    # Same split for every seed, so all runs are scored on the same test pages
+    data = load_data(seed=args.split_seed)
+    runs = [train_one(args, data, seed) for seed in args.seeds]
+
+    # Summary over seeds: mean ± standard deviation of each metric
+    print(f"=== {args.model.upper()} summary over seeds {args.seeds} ===")
+    summary = {}
+    for metric in ("val_acc", "val_macro_f1", "test_acc", "test_macro_f1",
+                   "train_time_s"):
+        values = [run[metric] for run in runs]
+        mean = statistics.mean(values)
+        std = statistics.stdev(values) if len(values) > 1 else 0.0
+        summary[metric] = {"mean": mean, "std": std}
+        print(f"  {metric:14s} {mean:.4f} ± {std:.4f}")
+
+    # Save every run plus the summary, so the README numbers can be traced
+    path = os.path.join(HERE, "results", f"{args.model}_results.json")
+    with open(path, "w") as f:
+        json.dump({"args": vars(args), "runs": runs, "summary": summary}, f, indent=2)
+    print(f"  saved results/{args.model}_results.json")
 
 
 if __name__ == "__main__":
