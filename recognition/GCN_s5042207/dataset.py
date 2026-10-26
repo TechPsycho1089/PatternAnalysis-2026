@@ -60,8 +60,51 @@ def load_graph(path=NPZ_PATH):
     return Data(x=x, edge_index=edge_index, y=y)
 
 
-if __name__ == "__main__":
+def stratified_split(y, train_frac=0.6, val_frac=0.2, seed=42):
+    """Split nodes into train/val/test masks, keeping the class mix equal.
+
+    Each class is shuffled and cut separately, so every split has the same
+    proportion of each class (important for the smaller politician class).
+    The remaining 1 - train_frac - val_frac of each class goes to test.
+    The same seed always gives the same split.
+
+    Returns three boolean masks of shape [N]: True = node is in that split.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    n = y.size(0)
+    train_mask = torch.zeros(n, dtype=torch.bool)
+    val_mask = torch.zeros(n, dtype=torch.bool)
+    test_mask = torch.zeros(n, dtype=torch.bool)
+
+    for c in y.unique():
+        idx = (y == c).nonzero(as_tuple=True)[0]                 # nodes of class c
+        idx = idx[torch.randperm(idx.numel(), generator=generator)]  # shuffle
+        n_train = round(train_frac * idx.numel())
+        n_val = round(val_frac * idx.numel())
+        train_mask[idx[:n_train]] = True
+        val_mask[idx[n_train:n_train + n_val]] = True
+        test_mask[idx[n_train + n_val:]] = True
+
+    # Leakage guard: every node must be in exactly one split
+    in_splits = train_mask.int() + val_mask.int() + test_mask.int()
+    assert (in_splits == 1).all(), "train/val/test masks overlap or miss nodes"
+
+    return train_mask, val_mask, test_mask
+
+
+def load_data(seed=42):
+    """Load the graph and attach train/val/test masks (used by train.py)."""
     data = load_graph()
+    data.train_mask, data.val_mask, data.test_mask = stratified_split(
+        data.y, seed=seed)
+    return data
+
+
+if __name__ == "__main__":
+    data = load_data()
     print(data)
     print("undirected:", data.is_undirected())
-    print("class counts:", torch.bincount(data.y).tolist())
+    for name in ["train_mask", "val_mask", "test_mask"]:
+        mask = data[name]
+        counts = torch.bincount(data.y[mask], minlength=len(CLASS_NAMES))
+        print(f"{name:10s} {int(mask.sum()):6d} nodes  per class: {counts.tolist()}")
