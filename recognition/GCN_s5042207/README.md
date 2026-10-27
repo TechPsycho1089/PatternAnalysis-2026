@@ -2,6 +2,46 @@
 
 *COMP3710 Pattern Recognition Report — s5042207*
 
+## Overview
+
+**Problem.** Facebook has many official ("verified") pages, and a platform may need to know what kind each one is, for example to apply political-advertising rules to politicians but not to TV shows. This project sorts 22,470 Facebook pages into four types: **TV show, government organisation, company or politician**.
+
+**Data.** Each page comes with two kinds of information:
+
+- **Features:** 128 numbers per page, derived from the text the page owners wrote about themselves.
+- **Links:** two pages are linked if they *like each other*. There are 170,823 such links.
+
+**Approach.** A **Graph Convolutional Network (GCN)** [Kipf & Welling, 2017] uses both the features and the links. It is compared with a **multi-layer perceptron (MLP)** that uses the features only, so the difference between the two shows how much the links help.
+
+**Why links should help.** Pages mostly like pages of their own type: 88.5% of links join two pages of the same type (this is called *homophily*). A politician's page is mostly liked by other politicians, so its neighbours are strong evidence of its type, even when its own description is vague.
+
+**Headline result** (test set, mean of 3 runs): the GCN reaches **94.4% accuracy** and the MLP **81.5%**.
+
+**The question beyond accuracy.** In practice, a model's predictions would be accepted automatically only when it is confident, with uncertain pages sent to a human. That only works if the model's confidence can be trusted. The links are also a weakness: for a page whose neighbours are mostly of a *different* type, the GCN is pulled towards the wrong answer, and it may be confidently wrong. The second half of this report tests whether that happens and recommends a rule for when to trust the model.
+
+## How it works
+
+**The MLP (baseline)** looks at each page on its own. Its input is the page's 128 features, which it passes through layers. Each layer multiplies by a learned weight matrix and then applies ReLU (negative values set to zero). The last layer outputs 4 scores, one per type.
+
+**The GCN** adds one step to every layer: *before* the multiplication, each page replaces its features with a weighted average of its own features and its neighbours' features. In matrix form, one layer is
+
+$$H^{(l+1)} = \text{ReLU}\left(\hat{A}\, H^{(l)}\, W^{(l)}\right), \qquad \hat{A} = D^{-1/2}(A + I)\,D^{-1/2}$$
+
+| Symbol | Meaning |
+|---|---|
+| $H^{(l)}$ | the features of every page entering layer $l$ (at the start, the 128 input features) |
+| $A$ | the link table: $A_{ij} = 1$ if pages $i$ and $j$ are linked |
+| $A + I$ | the links plus a link from each page to itself, so a page keeps its own features in the average |
+| $D$ | the number of links of each page (counting the self-link) |
+| $\hat{A}$ | the "averaging" matrix: the link between pages $i$ and $j$ gets weight $1/\sqrt{d_i d_j}$, so a page with hundreds of links does not drown out everyone it touches |
+| $W^{(l)}$ | the layer's learned weights, shared by all pages |
+
+Each layer reaches one link further. After 4 layers, a page's representation contains information from pages up to 4 links away. The MLP is exactly this network with $\hat{A}$ replaced by the identity matrix, i.e. with no averaging, which is why it is a fair baseline.
+
+**From scores to confidence.** The 4 final scores are turned into probabilities with softmax. The predicted type is the one with the highest probability, and that probability is the model's **confidence**.
+
+**Training.** The whole graph goes through the model at once, but the loss (cross-entropy) is computed only on the 60% of pages whose labels the model may see (the training set). The other pages still contribute their features and links, but not their labels. This is called *semi-supervised* learning. A further 20% (the validation set) is used to stop training at the epoch with the lowest validation loss, and the last 20% (the test set) is used once, at the end, to report results.
+
 ## Feasibility Review
 
 *Status as of 27 October 2026.*
