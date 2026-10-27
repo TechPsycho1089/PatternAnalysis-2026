@@ -21,6 +21,10 @@
 
 ## How it works
 
+![How the GCN classifies a page](figures/gcn_diagram.png)
+
+*Figure 1. (a) In each layer, page A combines its own features with those of the pages it is linked to; here three of its four neighbours are politicians, which pulls A towards "politician". (b) Four such layers are stacked, so information travels up to four links; the final scores become probabilities, and the highest one is the model's confidence. The probabilities shown are illustrative.*
+
 **The MLP (baseline)** looks at each page on its own. Its input is the page's 128 features, which it passes through layers. Each layer multiplies by a learned weight matrix and then applies ReLU (negative values set to zero). The last layer outputs 4 scores, one per type.
 
 **The GCN** adds one step to every layer: *before* the multiplication, each page replaces its features with a weighted average of its own features and its neighbours' features. In matrix form, one layer is
@@ -41,6 +45,50 @@ Each layer reaches one link further. After 4 layers, a page's representation con
 **From scores to confidence.** The 4 final scores are turned into probabilities with softmax. The predicted type is the one with the highest probability, and that probability is the model's **confidence**.
 
 **Training.** The whole graph goes through the model at once, but the loss (cross-entropy) is computed only on the 60% of pages whose labels the model may see (the training set). The other pages still contribute their features and links, but not their labels. This is called *semi-supervised* learning. A further 20% (the validation set) is used to stop training at the epoch with the lowest validation loss, and the last 20% (the test set) is used once, at the end, to report results.
+
+## Setup
+
+Tested on a Windows 11 laptop **CPU only** (no GPU needed) with:
+
+| Package | Version |
+|---|---|
+| Python | 3.12.10 |
+| PyTorch | 2.14.1 (CPU build) |
+| PyTorch Geometric | 2.8.1 |
+| scikit-learn | 1.9.1 |
+| NumPy | 2.5.4 |
+| Matplotlib | 3.11.2 |
+
+Install into a fresh virtual environment:
+
+```bash
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+pip install torch_geometric==2.8.1 scikit-learn==1.9.1 numpy==2.5.4 matplotlib==3.11.2
+```
+
+**Data.** The dataset is downloaded automatically on first run from the [Gayanku repository](https://github.com/gayanku/facebook_page-page_dataset) into `data/`, which is git-ignored and never committed. It is loaded with `allow_pickle=False`, so the file cannot run code when it is opened. The page-name array, which would need pickle, is skipped because it is not used.
+
+## Usage
+
+Run all commands from this folder (`recognition/GCN_s5042207/`).
+
+| Command | What it does | Time (laptop CPU) |
+|---|---|---|
+| `python dataset.py` | Downloads the data if needed and prints the cleaning report, the data audit and the class counts in each split | a few seconds |
+| `python train.py --model mlp` | Trains the 3-layer MLP baseline with seeds 0, 1 and 2 | about 1 min (≈ 20 s per seed) |
+| `python train.py --model gcn` | Trains the 4-layer GCN with seeds 0, 1 and 2 | about 15 min (≈ 5 min per seed) |
+
+Each training run saves:
+
+| File | Contents | In git? |
+|---|---|---|
+| `checkpoints/{model}_seed{n}.pt` | the trained weights (best validation epoch) | no (ignored) |
+| `figures/{model}_seed{n}_curves.png` | training and validation loss/accuracy curves | yes |
+| `results/{model}_results.json` | settings, per-seed scores and mean ± std | yes |
+
+Every setting can be changed from the command line, e.g. `python train.py --model gcn --layers 2 --seeds 0`. Run `python train.py --help` for the full list (layers, hidden size, dropout, learning rate, weight decay, maximum epochs, early-stopping patience, split seed).
+
+**Reproducibility.** The train/validation/test split uses a fixed seed (42) and is identical for every model and run. Each training seed fixes the weight initialisation and dropout. Repeating the MLP runs on the same machine reproduced the saved results exactly; small differences are possible on other hardware or library versions.
 
 ## Feasibility Review
 
