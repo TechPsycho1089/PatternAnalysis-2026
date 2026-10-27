@@ -5,6 +5,7 @@ Usage:
     python tune.py --model mlp               # phase 1: every combination, seed 0
     python tune.py --model gcn
     python tune.py --model gcn --confirm 3   # phase 2: top 3 + starting point, seeds 0, 1, 2
+    python tune.py --model lp                # label propagation reference (seconds)
 
 Phase 1 trains one model (seed 0) for every combination of layers x weight
 decay x dropout x hidden size. A single seed can be lucky, so phase 2 reruns
@@ -16,6 +17,10 @@ validation metrics are computed: test labels are never touched, so the test
 set stays a fair final check. Results are appended to
 results/tune_{model}.jsonl, one line per run; runs already in the file are
 skipped, so an interrupted search can simply be restarted.
+
+Label propagation has no weights to train: it spreads the training labels
+along the links, keeping a share alpha of what arrives from the neighbours at
+each of num_layers steps. Only alpha and the number of steps are searched.
 """
 import argparse
 import itertools
@@ -27,6 +32,7 @@ import time
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import f1_score
+from torch_geometric.nn import LabelPropagation
 
 from dataset import load_data
 from train import HERE, MODELS, train_step
@@ -48,6 +54,26 @@ def ece(probs, y, n_bins=15):
             gap = (correct[in_bin].mean() - conf[in_bin].mean()).abs()
             total += in_bin.float().mean().item() * gap.item()
     return total
+
+
+def label_propagation(data, num_layers, alpha):
+    """Spread the TRAINING labels along the links and return log-probabilities
+    for every page, so the result can be scored like a model's output."""
+    lp = LabelPropagation(num_layers=num_layers, alpha=alpha)
+    scores = lp(data.y, data.edge_index, mask=data.train_mask)
+    probs = scores / scores.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    return probs.clamp_min(1e-12).log()
+
+
+def val_metrics(logits, data):
+    """Validation accuracy, macro-F1, loss and calibration error."""
+    val = data.val_mask
+    probs = logits[val].softmax(dim=1)
+    pred = probs.argmax(dim=1)
+    return {"val_acc": (pred == data.y[val]).float().mean().item(),
+            "val_macro_f1": f1_score(data.y[val], pred, average="macro"),
+            "val_loss": F.cross_entropy(logits[val], data.y[val]).item(),
+            "val_ece": ece(probs, data.y[val])}
 
 
 def run(config, data, args):
@@ -74,18 +100,22 @@ def run(config, data, args):
         elif epoch - best_epoch >= args.patience:
             break
 
-    probs = best_out[val].softmax(dim=1)
-    pred = probs.argmax(dim=1)
-    return {"val_acc": (pred == data.y[val]).float().mean().item(),
-            "val_macro_f1": f1_score(data.y[val], pred, average="macro"),
-            "val_loss": best_val_loss,
-            "val_ece": ece(probs, data.y[val]),
+    return {**val_metrics(best_out, data),
             "best_epoch": best_epoch,
             "params": sum(p.numel() for p in model.parameters()),
             "train_time_s": time.perf_counter() - start}
 
 
+def run_lp(config, data):
+    start = time.perf_counter()
+    logits = label_propagation(data, config["layers"], config["alpha"])
+    return {**val_metrics(logits, data), "params": 0,
+            "train_time_s": time.perf_counter() - start}
+
+
 def describe(config):
+    if config["model"] == "lp":
+        return f"L={config['layers']} alpha={config['alpha']:g}"
     return (f"L={config['layers']} wd={config['weight_decay']:g} "
             f"drop={config['dropout']:g} h={config['hidden']}")
 
@@ -96,8 +126,11 @@ def same_settings(a, b):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    parser.add_argument("--model", choices=MODELS, default="gcn")
-    parser.add_argument("--layers", type=int, nargs="+", default=[2, 3, 4])
+    parser.add_argument("--model", choices=[*MODELS, "lp"], default="gcn")
+    parser.add_argument("--layers", type=int, nargs="+", default=None,
+                        help="default: 2 3 4 (lp: 10 50 propagation steps)")
+    parser.add_argument("--alpha", type=float, nargs="+", default=[0.5, 0.7, 0.9, 0.99],
+                        help="lp only: share kept from the neighbours at each step")
     parser.add_argument("--weight-decay", type=float, nargs="+", default=[0.0, 5e-5, 5e-4])
     parser.add_argument("--dropout", type=float, nargs="+", default=[0.0, 0.5])
     parser.add_argument("--hidden", type=int, nargs="+", default=[64, 128])
@@ -107,6 +140,8 @@ def main():
     parser.add_argument("--confirm", type=int, default=0, metavar="K",
                         help="phase 2: rerun the top K phase-1 settings with seeds 0, 1, 2")
     args = parser.parse_args()
+    if args.layers is None:
+        args.layers = [10, 50] if args.model == "lp" else [2, 3, 4]
 
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     path = os.path.join(HERE, "results", f"tune_{args.model}.jsonl")
@@ -123,6 +158,10 @@ def main():
         if not any(same_settings(c, START) for c in chosen):
             chosen.append({**chosen[0], **START})
         configs = [{**c, "seed": s} for c in chosen for s in (0, 1, 2)]
+    elif args.model == "lp":
+        # No random start, so one run per setting is enough
+        configs = [{"model": "lp", "layers": L, "alpha": a, "seed": 0}
+                   for L, a in itertools.product(args.layers, args.alpha)]
     else:
         configs = [{"model": args.model, "layers": L, "weight_decay": wd,
                     "dropout": p, "hidden": h, "lr": args.lr, "seed": 0}
@@ -133,7 +172,8 @@ def main():
     for config in configs:
         if any(r["config"] == config for r in done):
             continue
-        result = {"config": config, **run(config, data, args)}
+        result = {"config": config, **(run_lp(config, data) if args.model == "lp"
+                                       else run(config, data, args))}
         done.append(result)
         with open(path, "a") as f:
             f.write(json.dumps(result) + "\n")
