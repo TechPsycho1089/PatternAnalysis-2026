@@ -14,7 +14,7 @@ import os
 import numpy as np
 import torch
 from torch_geometric.data import Data, download_url
-from torch_geometric.utils import coalesce, remove_self_loops
+from torch_geometric.utils import coalesce, degree, homophily, remove_self_loops
 
 DATA_URL = ("https://raw.githubusercontent.com/gayanku/"
             "facebook_page-page_dataset/main/facebook.npz")
@@ -25,12 +25,13 @@ NPZ_PATH = os.path.join(DATA_DIR, "facebook.npz")
 CLASS_NAMES = ["tvshow", "government", "company", "politician"]
 
 
-def load_graph(path=NPZ_PATH):
+def load_graph(path=NPZ_PATH, verbose=False):
     """Load the Facebook page-page graph as a PyG Data object.
 
     Downloads the file on first use. Self-loops and duplicate edges are
     removed (GCNConv adds its own self-loops, and duplicates would make some
-    neighbours count twice when averaging).
+    neighbours count twice when averaging). With verbose=True, prints how
+    many edges each cleaning step removed.
 
     Returns a Data object with:
         x          [N, 128] float  node features
@@ -54,10 +55,46 @@ def load_graph(path=NPZ_PATH):
         torch.from_numpy(raw["edges_y"]),
     ]).long()
 
+    n_raw = edge_index.size(1)
+    is_loop = edge_index[0] == edge_index[1]
+    n_self_loops = int(is_loop.sum())
+    n_loop_pages = edge_index[0, is_loop].unique().numel()
     edge_index, _ = remove_self_loops(edge_index)
+    n_after_loops = edge_index.size(1)
     edge_index = coalesce(edge_index, num_nodes=x.size(0))  # sort + dedupe
 
+    if verbose:
+        print(f"edges in file:              {n_raw}")
+        print(f"self-loop entries removed:  {n_self_loops} "
+              f"(on {n_loop_pages} distinct pages)")
+        print(f"duplicate edges removed:    {n_after_loops - edge_index.size(1)}")
+        print(f"directed edges kept:        {edge_index.size(1)}")
+
     return Data(x=x, edge_index=edge_index, y=y)
+
+
+def describe_graph(data):
+    """Print a data audit: size, class balance, degree and homophily.
+
+    Homophily uses every node's label, including test nodes. This is fine
+    for describing the dataset, but these numbers must never be used to
+    train or tune a model.
+    """
+    n = data.num_nodes
+    print(f"nodes: {n}   undirected edges: {data.edge_index.size(1) // 2}   "
+          f"features per node: {data.num_features}")
+    counts = torch.bincount(data.y, minlength=len(CLASS_NAMES))
+    for name, c in zip(CLASS_NAMES, counts.tolist()):
+        print(f"  {name:11s} {c:6d}  ({c / n:.1%})")
+
+    deg = degree(data.edge_index[0], n)
+    print(f"degree: min {int(deg.min())}  median {int(deg.median())}  "
+          f"mean {deg.mean():.1f}  max {int(deg.max())}  "
+          f"isolated nodes {int((deg == 0).sum())}")
+
+    for method in ("edge", "node", "edge_insensitive"):
+        h = homophily(data.edge_index, data.y, method=method)
+        print(f"homophily ({method}): {h:.3f}")
 
 
 def stratified_split(y, train_frac=0.6, val_frac=0.2, seed=42):
@@ -101,9 +138,14 @@ def load_data(seed=42):
 
 
 if __name__ == "__main__":
-    data = load_data()
-    print(data)
+    print("=== Cleaning ===")
+    data = load_graph(verbose=True)
+    print("\n=== Data audit ===")
+    describe_graph(data)
     print("undirected:", data.is_undirected())
+
+    print("\n=== Split ===")
+    data.train_mask, data.val_mask, data.test_mask = stratified_split(data.y)
     for name in ["train_mask", "val_mask", "test_mask"]:
         mask = data[name]
         counts = torch.bincount(data.y[mask], minlength=len(CLASS_NAMES))
