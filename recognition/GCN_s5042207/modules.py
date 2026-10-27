@@ -1,8 +1,11 @@
 """
-Model definitions: a 2-layer MLP (baseline) and a 2-layer GCN (main model).
+Model definitions: a multi-layer MLP (baseline) and a multi-layer GCN (main
+model), each with a configurable number of layers.
 
 The two models are identical except that the GCN averages each node with its
 neighbours in every layer, so any difference in results comes from the graph.
+Depth was chosen on the validation set by a grid search over layers, weight
+decay, dropout and hidden size: 3 layers for the MLP, 4 for the GCN.
 
 Each GCN layer computes  H' = Â · H · W , where
     H · W   is an ordinary linear layer applied to every node, and
@@ -17,8 +20,14 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 
 
+def layer_sizes(in_dim, hidden, n_classes, num_layers):
+    """Input/output size of every layer, e.g. 3 layers: 128->64, 64->64, 64->4."""
+    dims = [in_dim] + [hidden] * (num_layers - 1) + [n_classes]
+    return list(zip(dims[:-1], dims[1:]))
+
+
 class MLP(torch.nn.Module):
-    """Two-layer perceptron baseline: classifies each node from its own
+    """Multi-layer perceptron baseline: classifies each node from its own
     features only, ignoring all edges.
 
     Input:  x [N, in_dim] node features, edge_index (accepted but ignored, so
@@ -26,38 +35,44 @@ class MLP(torch.nn.Module):
     Output: [N, n_classes] raw class scores (logits) for every node
     """
 
-    def __init__(self, in_dim=128, hidden=64, n_classes=4, dropout=0.5):
+    def __init__(self, in_dim=128, hidden=64, n_classes=4, num_layers=3,
+                 dropout=0.5):
         super().__init__()
-        self.lin1 = torch.nn.Linear(in_dim, hidden)     # 128 -> 64
-        self.lin2 = torch.nn.Linear(hidden, n_classes)  # 64 -> 4
+        self.layers = torch.nn.ModuleList(
+            torch.nn.Linear(d_in, d_out)
+            for d_in, d_out in layer_sizes(in_dim, hidden, n_classes, num_layers))
         self.dropout = dropout
 
     def forward(self, x, edge_index=None):
         # Same steps as the GCN below, minus the neighbour averaging
-        x = F.relu(self.lin1(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        return self.lin2(x)
+        for layer in self.layers[:-1]:
+            x = F.relu(layer(x))
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        return self.layers[-1](x)
 
 
 class GCN(torch.nn.Module):
-    """Two-layer graph convolutional network for node classification.
+    """Multi-layer graph convolutional network for node classification.
 
     Input:  x [N, in_dim] node features, edge_index [2, E] edges
     Output: [N, n_classes] raw class scores (logits) for every node
     """
 
-    def __init__(self, in_dim=128, hidden=64, n_classes=4, dropout=0.5):
+    def __init__(self, in_dim=128, hidden=64, n_classes=4, num_layers=4,
+                 dropout=0.5):
         super().__init__()
-        self.conv1 = GCNConv(in_dim, hidden)     # 128 -> 64
-        self.conv2 = GCNConv(hidden, n_classes)  # 64 -> 4
+        # cached=True: the graph never changes (transductive setting), so the
+        # normalised adjacency Â is computed once and reused every epoch
+        self.layers = torch.nn.ModuleList(
+            GCNConv(d_in, d_out, cached=True)
+            for d_in, d_out in layer_sizes(in_dim, hidden, n_classes, num_layers))
         self.dropout = dropout
 
     def forward(self, x, edge_index):
-        # Layer 1: mix each page with its neighbours, then ReLU (the "bend")
-        x = F.relu(self.conv1(x, edge_index))
-        # Dropout: randomly zero half the hidden values, during training only,
-        # so the model cannot rely too heavily on any single value
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        # Layer 2: mix again (now reaching neighbours of neighbours) and
-        # produce one score per class
-        return self.conv2(x, edge_index)
+        # Each hidden layer: mix every page with its neighbours (one more hop
+        # each time), apply ReLU (the "bend"), then dropout (training only)
+        for layer in self.layers[:-1]:
+            x = F.relu(layer(x, edge_index))
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        # Last layer: mix once more and produce one score per class
+        return self.layers[-1](x, edge_index)

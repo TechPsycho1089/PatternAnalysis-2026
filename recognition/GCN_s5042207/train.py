@@ -2,8 +2,9 @@
 Train, validate, test and save a node classifier (MLP baseline or GCN).
 
 Usage:
-    python train.py --model mlp                 # seeds 0, 1, 2 (default)
-    python train.py --model gcn --seeds 0       # a single quick run
+    python train.py --model mlp                 # 3 layers, seeds 0, 1, 2
+    python train.py --model gcn                 # 4 layers, seeds 0, 1, 2
+    python train.py --model gcn --layers 2 --seeds 0   # override depth
 
 Training is transductive and semi-supervised: the whole graph goes through
 the model every epoch, but the loss only uses the labels of training nodes.
@@ -32,6 +33,9 @@ from modules import GCN, MLP
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS = {"mlp": MLP, "gcn": GCN}
+# Best depth per model, chosen on the VALIDATION set by grid search over
+# layers x weight decay x dropout x hidden size (confirmed over 3 seeds)
+DEFAULT_LAYERS = {"mlp": 3, "gcn": 4}
 
 
 def train_step(model, data, optimizer):
@@ -83,7 +87,7 @@ def train_one(args, data, seed):
     torch.manual_seed(seed)
     model = MODELS[args.model](in_dim=data.num_features, hidden=args.hidden,
                                n_classes=int(data.y.max()) + 1,
-                               dropout=args.dropout)
+                               num_layers=args.layers, dropout=args.dropout)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
 
@@ -143,6 +147,8 @@ def main():
                         help="one run per seed (weight initialisation and dropout)")
     parser.add_argument("--split-seed", type=int, default=42,
                         help="seed for the train/val/test split (keep fixed)")
+    parser.add_argument("--layers", type=int, default=None,
+                        help="number of layers (default: 3 for mlp, 4 for gcn)")
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=0.01)
@@ -153,6 +159,8 @@ def main():
                         help="stop after this many epochs without "
                              "validation-loss improvement")
     args = parser.parse_args()
+    if args.layers is None:
+        args.layers = DEFAULT_LAYERS[args.model]
 
     for folder in ("checkpoints", "figures", "results"):
         os.makedirs(os.path.join(HERE, folder), exist_ok=True)
