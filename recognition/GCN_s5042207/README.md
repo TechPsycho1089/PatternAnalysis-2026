@@ -77,6 +77,8 @@ Run all commands from this folder (`recognition/GCN_s5042207/`).
 | `python dataset.py` | Downloads the data if needed and prints the cleaning report, the data audit and the class counts in each split | a few seconds |
 | `python train.py --model mlp` | Trains the 3-layer MLP baseline with seeds 0, 1 and 2 | about 1 min (≈ 20 s per seed) |
 | `python train.py --model gcn` | Trains the 4-layer GCN with seeds 0, 1 and 2 | about 15 min (≈ 5 min per seed) |
+| `python tune.py --model mlp` then `--confirm 3` | Settings search on validation only (see *Model selection*) | about 15 min |
+| `python tune.py --model gcn` then `--confirm 3` | Same for the GCN | about 5–6 hours |
 
 Each training run saves:
 
@@ -89,6 +91,114 @@ Each training run saves:
 Every setting can be changed from the command line, e.g. `python train.py --model gcn --layers 2 --seeds 0`. Run `python train.py --help` for the full list (layers, hidden size, dropout, learning rate, weight decay, maximum epochs, early-stopping patience, split seed).
 
 **Reproducibility.** The train/validation/test split uses a fixed seed (42) and is identical for every model and run. Each training seed fixes the weight initialisation and dropout. Repeating the MLP runs on the same machine reproduced the saved results exactly; small differences are possible on other hardware or library versions.
+
+## Data and pre-processing
+
+The dataset is the Facebook Large Page-Page Network [Rozemberczki et al., 2021], in the PyG-style version prepared by Gayanku. Each node is an official Facebook page, each edge is a mutual like between two pages, and each page has 128 features derived from its self-written description. The features are used as provided.
+
+**Cleaning** (printed by `python dataset.py`):
+
+| Step | Edge entries | Notes |
+|---|---|---|
+| In the file | 342,004 | each link is stored twice, once in each direction |
+| Self-loops removed | −358 | 179 pages are linked to themselves (each stored twice) |
+| Duplicates removed | 0 | none found |
+| **Kept** | **341,646** | = **170,823** undirected links |
+
+**Why remove self-loops?** A page "mutually liking itself" is not a real relationship between two pages. The original dataset does not explain these entries; 111 of the 179 are TV-show pages. More importantly, the GCN already adds one self-link to *every* page so that each page keeps its own features in the average (see *How it works*). Keeping the original self-loops would give those 179 pages a double share of their own features, treating them differently from everyone else for no reason.
+
+After cleaning, every page has at least one link (no isolated pages). The number of links per page is very uneven: the median page has 7 links, but the most connected has 709.
+
+**Class balance.** The four types are not equally common:
+
+| Type | Pages | Share |
+|---|---|---|
+| TV show | 6,495 | 28.9% |
+| Government | 6,880 | 30.6% |
+| Company | 5,768 | 25.7% |
+| Politician | 3,327 | **14.8%** |
+
+Politicians are the smallest group. Accuracy alone could hide poor performance on them, so the report also gives **macro-F1**, which weights every type equally, and per-type scores.
+
+## Train, validation and test split
+
+All 22,470 pages and all links are used during training, but labels are split into three groups. This is the standard *transductive* setting for node classification, and it matches the real use case: the platform can see the whole network and only lacks some of the labels.
+
+| Split | Share | Pages | TV show | Government | Company | Politician | Used for |
+|---|---|---|---|---|---|---|---|
+| Train | 60% | 13,482 | 3,897 | 4,128 | 3,461 | 1,996 | computing the loss (learning) |
+| Validation | 20% | 4,494 | 1,299 | 1,376 | 1,154 | 665 | early stopping, choosing settings, fitting calibration |
+| Test | 20% | 4,494 | 1,299 | 1,376 | 1,153 | 666 | final results only, used once |
+
+**Why stratified?** The split is made separately within each type, so every split has the same mix (about 15% politicians in each). A purely random split could, by chance, leave the validation or test set with noticeably fewer politicians, making the per-type results less reliable.
+
+**Why 60/20/20?** The platform already has many labelled pages, so a large training set is realistic. Validation and test each still have about 4,500 pages, which is large enough to:
+
+- measure accuracy to within about ±0.7 percentage points (95% interval at 94% accuracy);
+- give every type, even politicians, more than 600 test pages;
+- support the calibration and confidence-threshold analyses, which divide the test set into smaller groups.
+
+**Preventing leakage.** The split uses a fixed seed (42), so every model and every run sees the same pages in each group. The code checks (`assert`) that every page is in exactly one group. Test labels are never used for training, early stopping, choosing settings or calibration, and analyses that count a page's same-type neighbours use only training and validation labels.
+
+## Model selection
+
+All settings were chosen using **validation results only**. The test set was used once, after everything was fixed, by `train.py`. Code: `tune.py`. Every run is recorded in `results/tune_mlp.jsonl` and `results/tune_gcn.jsonl`.
+
+**Starting point:** the standard recipe of Kipf & Welling (2017): 2 layers, 64 hidden units, dropout 0.5, weight decay 5×10⁻⁴, Adam with learning rate 0.01, and early stopping after 50 epochs without validation-loss improvement.
+
+### Phase 1: every combination, one seed
+
+For each model, 36 combinations were trained: layers {2, 3, 4} × weight decay {0, 5×10⁻⁵, 5×10⁻⁴} × dropout {0, 0.5} × hidden units {64, 128}. The table shows the average validation accuracy of all runs with a given setting:
+
+| Setting | MLP | GCN |
+|---|---|---|
+| 2 / 3 / 4 layers | 0.798 / 0.801 / 0.799 | 0.934 / 0.944 / **0.946** |
+| dropout 0 / 0.5 | 0.789 / **0.809** | 0.940 / **0.943** |
+| hidden 64 / 128 | 0.799 / 0.799 | 0.941 / 0.942 |
+| weight decay 0 / 5×10⁻⁵ / 5×10⁻⁴ | 0.796 / 0.798 / 0.804 | 0.941 / 0.943 / 0.940 |
+
+- **Depth matters for the GCN, but hardly for the MLP.** Each extra GCN layer lets a page gather information from one link further away. An extra MLP layer only reprocesses the same 128 features of the same page.
+- **Dropout 0.5 helps both models**, so it is kept.
+- **Hidden size makes no difference**, so the smaller 64 is kept (about half the parameters).
+- **Weight decay interacts with depth for the GCN.** At 2 layers, the standard 5×10⁻⁴ *hurts* (0.929 vs 0.938 at 5×10⁻⁵). At 4 layers it makes no difference (0.946 for all three values). The standard 2-layer recipe was being held back by its own regularisation; with 4 layers that no longer matters, so the standard value is kept.
+
+### Phase 2: confirming the best settings with three seeds
+
+One seed can be lucky. The top 3 combinations of each model, plus the starting point, were rerun with seeds 0, 1 and 2 (validation accuracy and calibration error, mean ± std):
+
+| Model | Setting | Val accuracy | Val ECE |
+|---|---|---|---|
+| GCN | 4 layers, wd 5×10⁻⁴, dropout 0.5, hidden 64 | **0.948 ± 0.002** | **0.011 ± 0.002** |
+| GCN | 4 layers, wd 0, dropout 0.5, hidden 128 | 0.948 ± 0.002 | 0.013 ± 0.0003 |
+| GCN | 3 layers, wd 5×10⁻⁵, dropout 0.5, hidden 128 | 0.947 ± 0.001 | 0.013 ± 0.001 |
+| GCN | *starting point (2 layers)* | 0.927 ± 0.001 | 0.033 ± 0.001 |
+| MLP | 3 layers, wd 5×10⁻⁴, dropout 0.5, hidden 128 | 0.816 ± 0.005 | 0.035 ± 0.002 |
+| MLP | 3 layers, wd 5×10⁻⁵, dropout 0.5, hidden 128 | 0.815 ± 0.002 | 0.037 ± 0.002 |
+| MLP | 4 layers, wd 5×10⁻⁵, dropout 0.5, hidden 64 | 0.814 ± 0.004 | 0.025 ± 0.002 |
+| MLP | *starting point (2 layers)* | 0.805 ± 0.001 | 0.037 ± 0.002 |
+
+*ECE (expected calibration error) measures how far the model's confidence is from its actual accuracy; lower is better.*
+
+### Decision
+
+The best settings of each model differ by less than their seed-to-seed spread, so choosing between them would be choosing noise. The rule used was: **change as little as possible from the starting point**, which here means changing only the number of layers.
+
+- **GCN: 4 layers.** This is exactly the top confirmed setting. It gains 2.1 accuracy points over the starting point (about ten times the seed spread) and is also three times better calibrated (ECE 0.033 → 0.011).
+- **MLP: 3 layers.** With the other settings at the starting point, 3 and 4 layers are tied (0.813 vs 0.814 on seed 0), so the smaller model is used (12,676 vs 16,836 parameters). It gains about 1 point over the starting point. Tuning the baseline with the same budget keeps the comparison fair: the GCN's advantage is not just a better-tuned model against a neglected one.
+
+The final 3-seed runs of `train.py` reproduced these validation results (MLP 0.814 ± 0.001, GCN 0.947 ± 0.002).
+
+**Why not even deeper (or shallower)?** 1 and 8 layers were also checked, with the other settings at the starting point (seed 0):
+
+| Layers | MLP val accuracy | GCN val accuracy | GCN parameters |
+|---|---|---|---|
+| 1 | 0.761 | 0.854 | 516 |
+| 4 | 0.814 | 0.947 | 16,836 |
+| 8 | 0.306 | 0.940 | 33,476 |
+
+A 1-layer model is a single linear step and is too simple for either model. At 8 layers the GCN gets slightly *worse* while doubling its parameters and training time (about 10 min per run). This is consistent with **over-smoothing**: after 8 rounds of averaging, nearby pages of different types start to look alike. The 8-layer MLP failed to learn at all: 0.306 is exactly the share of the largest class (government), meaning it predicts "government" for every page. This is a known difficulty of training deep plain networks without extra help such as residual connections or normalisation layers, which this project deliberately does not add.
+
+*Note on the GCN search:* the GCN runs (about 5 CPU-hours) were made overnight with an earlier draft of `tune.py` that used the same data, models, training loop and settings; each of those lines in `results/tune_gcn.jsonl` is labelled. The MLP search was rerun with the final `tune.py`. Rerunning gives small differences (up to about 0.003 in validation accuracy for single runs) most likely because the overnight runs used a different number of CPU threads, which changes the order of floating-point additions; the conclusions are unchanged.
 
 ## Feasibility Review
 
