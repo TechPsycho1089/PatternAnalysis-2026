@@ -10,6 +10,9 @@ Original dataset: B. Rozemberczki, C. Allen and R. Sarkar, "Multi-scale
 Attributed Node Embedding", Journal of Complex Networks, 2021.
 """
 import os
+import pickle
+import sys
+import zipfile
 
 import numpy as np
 import torch
@@ -21,8 +24,11 @@ DATA_URL = ("https://raw.githubusercontent.com/gayanku/"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 NPZ_PATH = os.path.join(DATA_DIR, "facebook.npz")
 
-# Label index -> class name, as documented in the Gayanku repository
-CLASS_NAMES = ["tvshow", "government", "company", "politician"]
+# Label index -> class name (alphabetical). Checked against the page names
+# stored in the file: label 0 pages are e.g. Lenovo and Starbucks, label 2
+# pages are politicians, label 3 pages are TV shows. This differs from an
+# order given in the Gayanku repository, which does not match the data.
+CLASS_NAMES = ["company", "government", "politician", "tvshow"]
 
 
 def load_graph(path=NPZ_PATH, verbose=False):
@@ -41,8 +47,9 @@ def load_graph(path=NPZ_PATH, verbose=False):
     if not os.path.exists(path):
         download_url(DATA_URL, os.path.dirname(path))
 
-    # allow_pickle=False: we never read the 'page_name' array, which is the
-    # only one that needs pickle, and unpickling downloaded data is unsafe
+    # allow_pickle=False: unpickling downloaded data can run arbitrary code.
+    # The 'page_name' array, the only one that needs pickle, is read
+    # separately and safely by load_page_names()
     raw = np.load(path, allow_pickle=False)
 
     x = torch.from_numpy(raw["X"]).float()
@@ -73,6 +80,32 @@ def load_graph(path=NPZ_PATH, verbose=False):
     return Data(x=x, edge_index=edge_index, y=y)
 
 
+class _ArrayOnlyUnpickler(pickle.Unpickler):
+    """Unpickler that can only rebuild plain NumPy arrays. Anything else in
+    the file (e.g. a call to os.system) is refused instead of being run."""
+    ALLOWED = {("numpy", "ndarray"), ("numpy", "dtype"),
+               ("numpy.core.multiarray", "_reconstruct"),
+               ("numpy._core.multiarray", "_reconstruct")}
+
+    def find_class(self, module, name):
+        if (module, name) not in self.ALLOWED:
+            raise pickle.UnpicklingError(f"refused to load {module}.{name}")
+        return super().find_class(module, name)
+
+
+def load_page_names(path=NPZ_PATH):
+    """The name of every page (e.g. 'Senate of Canada'), index-aligned with
+    the nodes. Not used for training; only to check the class names and to
+    describe failure cases."""
+    with zipfile.ZipFile(path) as archive, archive.open("page_name.npy") as f:
+        version = np.lib.format.read_magic(f)
+        read_header = (np.lib.format.read_array_header_1_0 if version == (1, 0)
+                       else np.lib.format.read_array_header_2_0)
+        read_header(f)
+        names = _ArrayOnlyUnpickler(f).load()
+    return [str(name) for name in names]
+
+
 def describe_graph(data):
     """Print a data audit: size, class balance, degree and homophily.
 
@@ -101,7 +134,7 @@ def stratified_split(y, train_frac=0.6, val_frac=0.2, seed=42):
     """Split nodes into train/val/test masks, keeping the class mix equal.
 
     Each class is shuffled and cut separately, so every split has the same
-    proportion of each class (important for the smaller politician class).
+    proportion of each class (important for the smaller tvshow class).
     The remaining 1 - train_frac - val_frac of each class goes to test.
     The same seed always gives the same split.
 
@@ -138,11 +171,20 @@ def load_data(seed=42):
 
 
 if __name__ == "__main__":
+    # Page names include many scripts; never crash on a terminal that can't show them
+    sys.stdout.reconfigure(errors="backslashreplace")
     print("=== Cleaning ===")
     data = load_graph(verbose=True)
     print("\n=== Data audit ===")
     describe_graph(data)
     print("undirected:", data.is_undirected())
+
+    # Sanity check of CLASS_NAMES: the first few pages of every class
+    print("\n=== Example pages per class ===")
+    names = load_page_names()
+    for c, class_name in enumerate(CLASS_NAMES):
+        examples = [names[i] for i in (data.y == c).nonzero().squeeze(1)[:5].tolist()]
+        print(f"  {class_name:11s} {'; '.join(examples)}")
 
     print("\n=== Split ===")
     data.train_mask, data.val_mask, data.test_mask = stratified_split(data.y)
