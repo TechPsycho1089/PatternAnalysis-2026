@@ -13,7 +13,7 @@
 
 **Approach.** A **Graph Convolutional Network (GCN)** [Kipf & Welling, 2017] uses both the features and the links. It is compared with a **multi-layer perceptron (MLP)** that uses the features only, so the difference between the two shows how much the links help.
 
-**Why links should help.** Pages mostly like pages of their own type: 88.5% of links join two pages of the same type (this is called *homophily*). A politician's page is mostly liked by other politicians, so its neighbours are strong evidence of its type, even when its own description is vague.
+**Why links should help.** Sociologists have long observed that people tend to connect with others who are like them, "birds of a feather flock together". This tendency is called *homophily* [McPherson et al., 2001]: friends tend to share age, jobs and opinions. Facebook pages behave the same way. 88.5% of links join two pages of the same type: politicians like politicians, and TV shows like other TV shows. A page's neighbours are therefore strong evidence of its type, even when its own description is vague. The flip side, explored in this report, is what happens to the pages whose neighbours are *not* like them.
 
 **Headline result** (test set, mean of 3 runs): the GCN reaches **94.4% accuracy** and the MLP **81.5%**.
 
@@ -59,12 +59,15 @@ Tested on a Windows 11 laptop **CPU only** (no GPU needed) with:
 | NumPy | 2.5.4 |
 | Matplotlib | 3.11.2 |
 
-Install into a fresh virtual environment:
+**Python 3.12 is recommended.** It is the version everything was tested on, and also the minimum: NumPy 2.5.4 does not install on older versions. Newer Python versions may work but were not tested.
+
+The same package versions are pinned in `requirements.txt`. Install them into a fresh virtual environment:
 
 ```bash
-pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
-pip install torch_geometric==2.8.1 scikit-learn==1.9.1 numpy==2.5.4 matplotlib==3.11.2
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
+
+The extra index gives the smaller CPU-only build of PyTorch; leave it out to use the default build (with GPU support where available).
 
 **Data.** The dataset is downloaded automatically on first run from the [Gayanku repository](https://github.com/gayanku/facebook_page-page_dataset) into `data/`, which is git-ignored and never committed. It is loaded with `allow_pickle=False`, so the file cannot run code when it is opened. The page-name array, which needs pickle, is read separately with a restricted loader (see *Data and pre-processing*).
 
@@ -437,6 +440,7 @@ The graph adds about 13 accuracy points, far beyond seed-to-seed variation, so t
 ## References
 
 - T. N. Kipf and M. Welling, "Semi-supervised classification with graph convolutional networks," ICLR, 2017.
+- M. McPherson, L. Smith-Lovin and J. M. Cook, "Birds of a feather: Homophily in social networks," Annual Review of Sociology, vol. 27, pp. 415–444, 2001.
 - B. Rozemberczki, C. Allen and R. Sarkar, "Multi-scale attributed node embedding," Journal of Complex Networks, 2021.
 - C. Guo, G. Pleiss, Y. Sun and K. Q. Weinberger, "On calibration of modern neural networks," ICML, 2017.
 - J. Zhu et al., "Beyond homophily in graph neural networks: current limitations and effective designs," NeurIPS, 2020.
