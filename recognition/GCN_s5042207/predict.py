@@ -16,6 +16,9 @@ Loads the saved model of every seed, predicts every page once, and reports:
   5. t-SNE pictures of what each model's last hidden layer has learned
   6. the most confident GCN mistakes, page by page
   7. resources: parameters, inference time and peak memory
+  8. a politician-safety rule for the political-advertising use case: clear
+     a page as "not a politician" automatically only when its politician
+     probability is tiny (GCN alone, or GCN and MLP both), else ask a human
 
 Label propagation (graph only, no features, no training) is included as a
 reference in the tables. Numbers are mean ± std over the seeds. All settings
@@ -44,6 +47,7 @@ from train import HERE, MODELS, evaluate, train_step
 from tune import ece, label_propagation
 
 TARGET_ACC = 0.97        # triage target from the feasibility review (criterion 3)
+MAX_MISSED = 0.01        # politician-safety rule: miss at most 1% of real politicians
 HOMOPHILY_BINS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)]
 # Okabe-Ito colour-blind-safe colours, same as Figure 1 in the README
 TYPE_COLOURS = ["#009E73", "#0072B2", "#CC79A7", "#E69F00"]   # in CLASS_NAMES order
@@ -114,9 +118,9 @@ def mean_std(runs):
             for k in runs[0]}
 
 
-def print_table(title, report, models):
+def print_table(title, report, models, labels=NAMES):
     print(f"\n=== {title} (mean ± std over seeds) ===")
-    print(f"{'':24s}" + "".join(f"{NAMES[m]:>20s}" for m in models))
+    print(f"{'':24s}" + "".join(f"{labels[m]:>20s}" for m in models))
     for metric in report[models[0]]:
         cells = "".join(f"{report[m][metric]['mean']:>12.3f} ± {report[m][metric]['std']:.3f}"
                         for m in models)
@@ -361,6 +365,70 @@ def neighbour_summary(data, page):
             "test_neighbours": int((~known).sum())}
 
 
+# ---------------------------------------------------------------- 8. politician safety
+
+def choose_clear_threshold(score, is_politician, max_missed=MAX_MISSED):
+    """The HIGHEST cut-off t such that clearing every page with score <= t
+    as "not a politician" misses at most `max_missed` of the real
+    politicians. A higher cut-off clears more pages automatically (fewer
+    human reviews), so the highest one that meets the target is the best.
+    Chosen on VALIDATION pages only; capped at 0.5, where a page is more
+    likely a politician than not."""
+    pol_scores = score[is_politician].sort().values
+    allowed = int(max_missed * len(pol_scores))      # politicians we may miss
+    if allowed >= len(pol_scores):
+        return 0.5
+    # just below the score of the first politician we may NOT miss
+    t = torch.nextafter(pol_scores[allowed], torch.tensor(float("-inf"))).item()
+    return min(t, 0.5)
+
+
+def politician_outcomes(cleared, auto_political, is_politician):
+    """How a political / not political / human-review split performs."""
+    human = ~cleared & ~auto_political
+    return {"missed_politicians": (cleared & is_politician).float().sum().item()
+                                  / is_politician.sum().item(),
+            "missed_count": int((cleared & is_politician).sum()),
+            "human_review": human.float().mean().item(),
+            "auto_political": auto_political.float().mean().item(),
+            "false_political": (auto_political & ~is_politician).float().sum().item()
+                               / (~is_politician).sum().item()}
+
+
+def safety_rule(score, gcn_p, threshold):
+    """Clear as not political if score <= threshold; mark as political if the
+    GCN thinks a politician is more likely than not; otherwise ask a human."""
+    cleared = score <= threshold
+    return cleared, ~cleared & (gcn_p >= 0.5)
+
+
+def plot_politician(curves, points, path):
+    """Politicians missed against the share of pages sent to a human, as the
+    cut-off for clearing pages moves (test set, mean over seeds)."""
+    fig, ax = plt.subplots(figsize=(6.6, 4.6))
+    styles = {"gcn_only": ("GCN only", MODEL_COLOURS["gcn"], "-"),
+              "gcn_mlp": ("GCN + MLP second opinion", MODEL_COLOURS["mlp"], "-")}
+    for key, (human, missed) in curves.items():
+        label, colour, ls = styles[key]
+        ax.plot(human * 100, missed * 100, lw=2, ls=ls, color=colour, label=label)
+    for key, (human, missed, text) in points.items():
+        colour = styles[key][1] if key in styles else "#555555"
+        ax.plot(human * 100, missed * 100, "o", ms=9, color=colour,
+                markeredgecolor="white", markeredgewidth=2)
+        ax.annotate(text, (human * 100, missed * 100), textcoords="offset points",
+                    xytext=(8, 6), fontsize=9)
+    ax.axhline(MAX_MISSED * 100, color="#999999", lw=1, ls="--")
+    ax.text(29, MAX_MISSED * 100 + 0.08, f"{MAX_MISSED:.0%} target", fontsize=9, color="#555555")
+    ax.set(xlabel="pages sent to a human (%)", ylabel="real politicians cleared as not political (%)",
+           xlim=(0, 35), ylim=(0, 4.5),
+           title="Test: politicians missed vs human workload")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------- 7. resources
 
 def peak_memory_mb():
@@ -583,10 +651,74 @@ def main():
     print(f"  peak memory: {resources['peak_memory_inference_mb']:.0f} MB (inference), "
           f"{resources['peak_memory_whole_run_mb']:.0f} MB (whole run, incl. t-SNE and training)")
 
+    # 8. Politician safety: cut-offs chosen on VALIDATION, judged on test ----
+    pol = CLASS_NAMES.index("politician")
+    is_pol = data.y == pol
+    rules = {"current_triage": "Current triage (3.)", "gcn_only": "GCN only",
+             "gcn_mlp": "GCN + MLP"}
+    runs = {key: [] for key in rules}
+    seed_curves = {"gcn_only": [], "gcn_mlp": []}
+    rule_thresholds, rescued = {}, []
+    grid = torch.linspace(0, 0.5, 201).tolist()
+    for s in probs["gcn"]:
+        gcn_p = probs["gcn"][s][:, pol]
+        scores = {"gcn_only": gcn_p,
+                  # second opinion: the more worried of the two models
+                  "gcn_mlp": torch.maximum(gcn_p, probs["mlp"][s][:, pol])}
+        # Section 3's triage rule, seen from the politician angle
+        conf, pred = probs["gcn"][s].max(dim=1)
+        auto = conf >= thresholds[("gcn", s)]
+        runs["current_triage"].append({"threshold": thresholds[("gcn", s)], **politician_outcomes(
+            (auto & (pred != pol))[test], (auto & (pred == pol))[test], is_pol[test])})
+        cleared_by = {}
+        for key, score in scores.items():
+            t = choose_clear_threshold(score[val], is_pol[val])
+            rule_thresholds[(key, s)] = t
+            cleared, auto_pol = safety_rule(score, gcn_p, t)
+            cleared_by[key] = cleared
+            runs[key].append({"threshold": t, **politician_outcomes(
+                cleared[test], auto_pol[test], is_pol[test])})
+            curve = []
+            for g in grid:
+                c, a = safety_rule(score[test], gcn_p[test], g)
+                o = politician_outcomes(c, a, is_pol[test])
+                curve.append((o["human_review"], o["missed_politicians"]))
+            seed_curves[key].append(torch.tensor(curve))
+        # Real politicians that GCN alone would clear, but the second opinion catches
+        rescued.append(int((cleared_by["gcn_only"] & ~cleared_by["gcn_mlp"] & is_pol & test).sum()))
+
+    report["politician_safety"] = {key: mean_std(r) for key, r in runs.items()}
+    report["politician_safety"]["rescued_by_second_opinion"] = statistics.mean(rescued)
+    print_table(f"8. Politician safety (cut-offs chosen on validation to miss <= {MAX_MISSED:.0%})",
+                report["politician_safety"], tuple(rules), labels=rules)
+    print(f"  politicians caught by the second opinion that GCN alone would clear: "
+          f"{statistics.mean(rescued):.1f} per seed")
+
+    # What the rules do with the politicians among the failure cases (seed 0)
+    for c in cases:
+        if c["true_type"] == "politician":
+            i = c["page"]
+            decisions = {}
+            for key in ("gcn_only", "gcn_mlp"):
+                g = probs["gcn"][0][i, pol]
+                score = g if key == "gcn_only" else torch.maximum(g, probs["mlp"][0][i, pol])
+                decisions[key] = ("cleared as not political" if score <= rule_thresholds[(key, 0)]
+                                  else "political" if g >= 0.5 else "sent to a human")
+            c["politician_rule"] = decisions
+            print(f"  failure case {c['name']!r}: GCN only -> {decisions['gcn_only']}, "
+                  f"GCN + MLP -> {decisions['gcn_mlp']}")
+
+    points = {key: (report["politician_safety"][key]["human_review"]["mean"],
+                    report["politician_safety"][key]["missed_politicians"]["mean"],
+                    rules[key].replace(" (3.)", "")) for key in rules}
+    plot_politician({key: (torch.stack(c).mean(dim=0)[:, 0], torch.stack(c).mean(dim=0)[:, 1])
+                     for key, c in seed_curves.items()}, points,
+                    os.path.join(HERE, "figures", "politician_safety.png"))
+
     with open(os.path.join(HERE, "results", "test_metrics.json"), "w") as f:
         json.dump(report, f, indent=2)
     print("\nsaved results/test_metrics.json and figures/{confusion_matrices, reliability, "
-          "triage, homophily, tsne}.png")
+          "triage, homophily, tsne, politician_safety}.png")
 
 
 if __name__ == "__main__":

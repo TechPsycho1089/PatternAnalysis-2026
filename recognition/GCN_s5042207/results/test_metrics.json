@@ -614,26 +614,111 @@
           "politician": 10,
           "tvshow": 0
         },
-        "test_neighbours": 29
+        "test_neighbours": 29,
+        "politician_rule": {
+          "gcn_only": "cleared as not political",
+          "gcn_mlp": "sent to a human"
+        }
       }
     ]
   },
   "resources": {
-    "peak_memory_inference_mb": 707.9375,
+    "peak_memory_inference_mb": 710.09765625,
     "mlp": {
       "parameters": 12676,
-      "inference_s": 0.008730750007089227,
-      "train_epoch_s": 0.10903082999866456,
+      "inference_s": 0.012166849977802485,
+      "train_epoch_s": 0.14886365999700502,
       "epochs_run_mean": 170,
-      "estimated_train_time_s": 18.535241099772975
+      "estimated_train_time_s": 25.306822199490853
     },
     "gcn": {
       "parameters": 16836,
-      "inference_s": 0.22239900002023205,
-      "train_epoch_s": 1.0186321999994106,
+      "inference_s": 0.290011550008785,
+      "train_epoch_s": 1.306859879998956,
       "epochs_run_mean": 355.6666666666667,
-      "estimated_train_time_s": 362.2935191331237
+      "estimated_train_time_s": 464.8064973196287
     },
-    "peak_memory_whole_run_mb": 823.59765625
+    "peak_memory_whole_run_mb": 730.67578125
+  },
+  "politician_safety": {
+    "current_triage": {
+      "threshold": {
+        "mean": 0.7618624766667684,
+        "std": 0.0079641039817428
+      },
+      "missed_politicians": {
+        "mean": 0.017056952876553916,
+        "std": 0.0021826639014948684
+      },
+      "missed_count": {
+        "mean": 19.666666666666668,
+        "std": 2.516611478423583
+      },
+      "human_review": {
+        "mean": 0.079142560561498,
+        "std": 0.0024611584953865644
+      },
+      "auto_political": {
+        "mean": 0.24106215933958688,
+        "std": 0.0017847821136504401
+      },
+      "false_political": {
+        "mean": 0.00848049486181782,
+        "std": 0.0009621521262090149
+      }
+    },
+    "gcn_only": {
+      "threshold": {
+        "mean": 0.035858478397130966,
+        "std": 0.015950325675906922
+      },
+      "missed_politicians": {
+        "mean": 0.007516623301532235,
+        "std": 0.0005007374407542289
+      },
+      "missed_count": {
+        "mean": 8.666666666666666,
+        "std": 0.5773502691896257
+      },
+      "human_review": {
+        "mean": 0.08337041859825452,
+        "std": 0.02151578672906284
+      },
+      "auto_political": {
+        "mean": 0.25871533155441284,
+        "std": 0.002782234796976703
+      },
+      "false_political": {
+        "mean": 0.018058465529282648,
+        "std": 0.0024193067251286325
+      }
+    },
+    "gcn_mlp": {
+      "threshold": {
+        "mean": 0.374041606982549,
+        "std": 0.05903698117380175
+      },
+      "missed_politicians": {
+        "mean": 0.01850245735761781,
+        "std": 0.0040987125986579435
+      },
+      "missed_count": {
+        "mean": 21.333333333333332,
+        "std": 4.725815626252609
+      },
+      "human_review": {
+        "mean": 0.051476042717695236,
+        "std": 0.01615268806465545
+      },
+      "auto_political": {
+        "mean": 0.25871533155441284,
+        "std": 0.002782234796976703
+      },
+      "false_political": {
+        "mean": 0.018058465529282648,
+        "std": 0.0024193067251286325
+      }
+    },
+    "rescued_by_second_opinion": 4.666666666666667
   }
 }
