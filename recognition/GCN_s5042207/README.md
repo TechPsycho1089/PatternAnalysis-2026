@@ -215,7 +215,7 @@ A 1-layer model is a single linear step and is too simple for either model. At 8
 
 ## Results
 
-All numbers are on the **test set** (4,494 pages), as the mean ± standard deviation over 3 training seeds, produced by `python predict.py` (full output in `results/test_metrics.json`). Label propagation (LP) has no random start, so it has a single run.
+All numbers are on the **test set** (4,494 pages), as the mean ± standard deviation over 3 training seeds, produced by `python predict.py` (full output in `results/test_metrics.json`). Label propagation (LP) is a training-free algorithm rather than a learned model: it has no weights and simply spreads the training labels along the links, so it has a single run.
 
 ### Training
 
@@ -325,7 +325,42 @@ Two kinds of failure appear:
 1. **Boundary cases, where the label itself is debatable** (a parliament, a party, a TV channel). Both models disagree with the label, and arguably so would many people. These are problems of the category definitions, not of the model.
 2. **Pages the graph misleads** (DIRECTV, Laurent Fabius): the page's own description is clear and the MLP gets it right, but its neighbours belong to a related type, and averaging over them overrides the evidence. This is exactly the low-homophily failure of Section 4.
 
-### 6. Resources
+### 6. Not all mistakes cost the same: a politician-safety rule
+
+For the political-advertising use case, the mistakes are not equally costly:
+
+| Mistake | Consequence | Cost |
+|---|---|---|
+| A **politician** treated as not political (missed politician) | Their ads skip the political-ad checks | **High** |
+| A non-politician treated as political (false politician) | Unneeded checks, fixed on appeal | Low |
+| Company ↔ TV show, government ↔ company | No effect on political-ad rules | None |
+
+Nearly half of the triage rule's automated mistakes (Section 3) are of the harmless kind, but it also lets through about 20 missed politicians per seed (1.7% of all politicians). The goal is therefore not "few mistakes" but **"almost no missed politicians"**, accepting more false politicians and more human reviews in exchange.
+
+**The rule.** Instead of the model's top confidence, look at its **probability that the page is a politician**:
+
+- probability ≥ 0.5 → **political** (automatic);
+- probability at or below a small cut-off → **not political** (automatic);
+- anything in between → **human review**.
+
+The cut-off was chosen on **validation** as the highest value that misses at most **1%** of real politicians (a policy target fixed before looking at test results). A second version adds the **MLP as a second opinion**: a page is cleared only if *both* models give it a small politician probability. This is aimed at pages like Laurent Fabius, where the description clearly says "politician" (the MLP was certain) but the links mislead the GCN.
+
+| Rule (test, mean ± std over seeds) | Cut-off (from validation) | Politicians missed | Pages sent to a human | Non-politicians treated as political |
+|---|---|---|---|---|
+| Triage rule from Section 3 | confidence 0.76 | 1.7% ± 0.2% (20 pages) | 7.9% | 0.8% |
+| **Politician-safety rule, GCN only** | P(politician) ≤ 0.036 | **0.8% ± 0.1% (9 pages)** | 8.3% | 1.8% |
+| Politician-safety rule, GCN + MLP | both ≤ 0.37 | 1.9% ± 0.4% (21 pages) | 5.1% | 1.8% |
+
+![Politician safety](figures/politician_safety.png)
+
+*Figure 8. Politicians cleared as not political against the share of pages sent to a human, as the cut-off moves (test, mean over seeds). Dots: cut-offs chosen on validation.*
+
+- **The GCN-only rule meets the 1% target on test** and **halves the missed politicians** (from 20 to 9 per seed) for about the same human workload as the general triage rule. The price is a few more false politicians (1.8% of non-politicians), which this use case can accept.
+- **The second opinion did not hold up.** On validation it reached the 1% target with fewer human reviews, but on test its cut-off missed 1.9% of politicians, and its curve lies above the GCN-only curve for any workload under about 20%. It does rescue some politicians the GCN alone would clear (about 5 per seed, including Laurent Fabius, who goes to a human instead of being cleared), but it needs a much higher cut-off, which lets others through. With about 1,150 politicians per evaluation set, a 1% target is only 11–12 pages, so differences of a few pages are within noise; the evidence does not show that the second opinion helps.
+
+*Caveat:* the two versions were planned in advance, but the conclusion that the GCN-only version is the better one was reached after seeing the test results, so its test numbers are slightly optimistic. The rule should be confirmed on new data before use.
+
+### 7. Resources
 
 | | MLP | GCN |
 |---|---|---|
@@ -333,7 +368,7 @@ Two kinds of failure appear:
 | Prediction for all 22,470 pages | 0.01 s | 0.22 s |
 | Training time per run (one seed) | ≈ 19 s | ≈ 6 min |
 
-Peak memory of the whole Python process was **0.71 GB** after loading the graph and all seven models and predicting every page, and 0.82 GB at the end of `predict.py` (including t-SNE and the timing runs).
+Peak memory of the whole Python process was **0.71 GB** after loading the graph and all six trained models, running label propagation and predicting every page, and 0.82 GB at the end of `predict.py` (including t-SNE and the timing runs).
 
 *Measured by `predict.py` on a Windows laptop CPU: time per epoch × the mean number of epochs actually run (best epoch + 50).*
 
@@ -354,9 +389,9 @@ The two near-misses are reported as they are; the thresholds and settings were n
 **For the trust-and-safety team:** the GCN is good enough to sort most pages automatically, but its confidence cannot be fully trusted on one identifiable kind of page.
 
 1. **Use the GCN with a confidence threshold**, and send the rest to human review. At the threshold chosen here, about 92% of pages are decided automatically, with about 97% accuracy, while the MLP could only automate about 42% at the same accuracy. Because a threshold set exactly at the target came out slightly short on new data, **set it with a safety margin** (for example, aim for 98% on validation). Figure 6 suggests about 80% of pages could still be automated at that level, but this should be confirmed on fresh data, not on this test set.
-2. **Do not rely on confidence alone for politician vs government, or company vs TV show.** Almost all confident mistakes are between these pairs, and they concentrate on pages whose neighbours are mostly of the other type. For the political-advertising use case, the important errors are politicians labelled as government and vice versa. **Audit a random sample of automated politician/government decisions** regularly.
+2. **For political-ad decisions, use the politician-safety rule (Section 6), not the general threshold.** Clear a page as "not political" only when the GCN's politician probability is tiny, mark likely politicians as political, and send the rest to a human. On test this halved the missed politicians (to 0.8%) for about the same number of human reviews, at the acceptable cost of some unnecessary checks on non-politicians. Because a few politicians are still cleared with near-total confidence (pages misled by their neighbours), **also audit a random sample of pages cleared as "not political"**, especially government pages.
 3. **Write clear rules for boundary entities** such as parliaments, political parties and broadcasters. Several "mistakes" are pages where the label itself is debatable; the model cannot be more consistent than the labels it learns from.
-4. **Residual risk:** about 2.8% of all pages (126 of 4,494) would be decided automatically and wrongly, mostly with high confidence. On validation, two label-free warning signals were tested (the MLP disagreeing with the GCN, and how many neighbours the GCN predicts to have the same type as the page); neither removed more errors than simply raising the threshold.
+4. **Residual risk:** about 2.8% of all pages (126 of 4,494) would be decided automatically and wrongly, mostly with high confidence. On validation, two label-free warning signals were tested (the MLP disagreeing with the GCN, and how many neighbours the GCN predicts to have the same type as the page); neither removed more errors than simply raising the threshold. A politician-specific second opinion from the MLP also did not hold up on test (Section 6).
 
 **Why does this happen?** A GCN assumes that linked pages are similar. That is true for 88.5% of links, which is why it beats the MLP by 13 points. For a page whose links mostly go to another type, the assumption fails, and because the model has never been told that the assumption *can* fail, its confidence does not drop. Methods designed for this, such as letting the model learn how much to trust each neighbour (GAT), were tried briefly on validation and did not help here (see the feasibility review); models designed for low-homophily graphs [Zhu et al., 2020] are the natural next step.
 
@@ -365,6 +400,11 @@ The two near-misses are reported as they are; the thresholds and settings were n
 - The 0–25% group has only 142 test pages, so its numbers are less precise (±8 points).
 - Local homophily uses the page's own true type, so it explains the errors after the fact but cannot be computed for a new, unlabelled page.
 - The labels themselves contain debatable cases (Section 5), so part of the "error" is disagreement about categories.
+
+**Future work.**
+- **GNNs built for misleading neighbours.** The GCN averages all neighbours equally, so a page surrounded by another type is pulled towards it. Models designed for low homophily [Zhu et al., 2020] keep a page's *own* features separate from its neighbours' at every layer, so a clear description (like Laurent Fabius's) cannot be drowned out. A GAT, which learns how much to listen to each neighbour, was tried briefly here without benefit; these models target the failure more directly and are the most promising next step.
+- **Several models as a warning system.** Train several GNNs (different seeds or architectures) and send a page to a human when they *disagree* about whether it is a politician. Disagreement between models is a well-known sign of uncertainty [Lakshminarayanan et al., 2017]. The MLP second opinion in Section 6 was a first, inconclusive test of this idea; a larger group of graph models, evaluated on more data, would give a fairer answer.
+
 ## AI usage disclosure
 
 This project was done with the help of an AI coding assistant (Claude Code, by Anthropic). How it was used:
@@ -440,6 +480,7 @@ The graph adds about 13 accuracy points, far beyond seed-to-seed variation, so t
 ## References
 
 - T. N. Kipf and M. Welling, "Semi-supervised classification with graph convolutional networks," ICLR, 2017.
+- B. Lakshminarayanan, A. Pritzel and C. Blundell, "Simple and scalable predictive uncertainty estimation using deep ensembles," NeurIPS, 2017.
 - M. McPherson, L. Smith-Lovin and J. M. Cook, "Birds of a feather: Homophily in social networks," Annual Review of Sociology, vol. 27, pp. 415–444, 2001.
 - B. Rozemberczki, C. Allen and R. Sarkar, "Multi-scale attributed node embedding," Journal of Complex Networks, 2021.
 - C. Guo, G. Pleiss, Y. Sun and K. Q. Weinberger, "On calibration of modern neural networks," ICML, 2017.
