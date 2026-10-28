@@ -268,6 +268,8 @@ The GCN separates the four types into four clean groups, and its mistakes sit on
 
 ### 3. Triage: how many pages can be decided automatically?
 
+The 97% target is the one set in the feasibility review (criterion 3), before the main experiments. It is a judgement call: the GCN is about 94% accurate overall, so asking for 97% on the automated pages forces it to hand its hardest pages to a human, keeping automated decisions about as reliable as a careful human check.
+
 On **validation**, for each model, we chose the lowest confidence threshold at which the automatically decided pages were still 97% accurate. That threshold was then applied to the test set:
 
 | | MLP | GCN | LP |
@@ -416,7 +418,7 @@ This project was done with the help of an AI coding assistant (Claude Code, by A
 
 ## Feasibility Review
 
-*Status as of 27 October 2026, when it was checked off. Kept as it was, except that the type names in the data audit table were corrected afterwards (see* Checking the label names*).*
+*Status as of 27 October 2026, when it was checked off. Kept as it was, except that the type names in the data audit table were corrected afterwards (see* Checking the label names*), and a short explanation of the criterion 3 targets was added.*
 
 ### 1. User need, scope and acceptance criteria
 
@@ -428,7 +430,7 @@ Acceptance criteria (test split, mean over 3 seeds; set before the main experime
 
 1. **Accuracy:** GCN test macro-F1 ≥ 0.85 and higher than the MLP baseline on identical splits.
 2. **Calibration:** after temperature scaling fitted on the validation set only, GCN expected calibration error (ECE) ≤ 0.05.
-3. **Triage:** a confidence threshold chosen on validation automates ≥ 80% of test pages at ≥ 97% accuracy, with the rest routed to humans.
+3. **Triage:** a confidence threshold chosen on validation automates ≥ 80% of test pages at ≥ 97% accuracy, with the rest routed to humans. *Why these numbers:* the smoke-test GCN was about 92% accurate overall, so 97% on the automated pages means clearly fewer mistakes than accepting every prediction (roughly a third as many), while still being reachable by handing the hardest pages to a human; 80% automation keeps the human workload to about one page in five, which makes the system worth deploying.
 4. **Leakage:** train/val/test masks are disjoint (asserted in code), and test labels are never used for loss, early stopping, tuning or calibration.
 5. **Resources:** training both models takes < 5 min on a laptop CPU with < 2 GB peak memory, and full-graph inference takes < 1 s.
 
