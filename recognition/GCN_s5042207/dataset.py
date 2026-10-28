@@ -9,6 +9,7 @@ Data source: the modified PyG FacebookPagePage file prepared by Gayanku
 Original dataset: B. Rozemberczki, C. Allen and R. Sarkar, "Multi-scale
 Attributed Node Embedding", Journal of Complex Networks, 2021.
 """
+import hashlib
 import os
 import pickle
 import sys
@@ -23,6 +24,10 @@ DATA_URL = ("https://raw.githubusercontent.com/gayanku/"
             "facebook_page-page_dataset/main/facebook.npz")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 NPZ_PATH = os.path.join(DATA_DIR, "facebook.npz")
+# Fingerprint of the exact file every result in this project was made with.
+# DATA_URL points at a live branch, so the file could change upstream; this
+# makes sure nobody silently gets different data (or a tampered file).
+NPZ_SHA256 = "7a1b8a0687515e9859d1ca649dc276825f5db44568894dfbb6b55ebc1cf6a9c1"
 
 # Label index -> class name (alphabetical). Checked against the page names
 # stored in the file: label 0 pages are e.g. Lenovo and Starbucks, label 2
@@ -46,6 +51,15 @@ def load_graph(path=NPZ_PATH, verbose=False):
     """
     if not os.path.exists(path):
         download_url(DATA_URL, os.path.dirname(path))
+
+    # Stop early if the file is not the one the results were made with,
+    # rather than training on different data without anyone noticing
+    with open(path, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    if digest != NPZ_SHA256:
+        raise ValueError(f"{path} does not match the expected dataset file "
+                         f"(SHA-256 {digest}, expected {NPZ_SHA256}). It may have "
+                         f"changed upstream; delete it to re-download, or check the source.")
 
     # allow_pickle=False: unpickling downloaded data can run arbitrary code.
     # The 'page_name' array, the only one that needs pickle, is read
